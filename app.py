@@ -5,47 +5,55 @@ import io
 import numpy as np
 from streamlit_drawable_canvas import st_canvas
 
+HIGH_RES_WIDTH = 1200
+DISPLAY_WIDTH = 600
+
+def resize_image(image, target_width):
+    w, h = image.size
+    if w > target_width:
+        ratio = target_width / w
+        new_h = int(h * ratio)
+        return image.resize((target_width, new_h), Image.LANCZOS)
+    return image
+
 @st.cache_data
-def remove_background(input_data):
-    output_image_data = remove(input_data.read())
+def remove_background(input_data_bytes):
+    output_image_data = remove(input_data_bytes)
     output_image = Image.open(io.BytesIO(output_image_data)).convert("RGBA")
     return output_image
 
 def apply_adjustments(image, contrast_factor, brightness_factor):
-    adjusted_image = image.copy().convert("RGBA") 
-    
+    adjusted_image = image.copy().convert("RGBA")
     contraster = ImageEnhance.Contrast(adjusted_image)
     adjusted_image = contraster.enhance(contrast_factor)
-    
     brighter = ImageEnhance.Brightness(adjusted_image)
     final_img = brighter.enhance(brightness_factor)
-    
     return final_img
 
-def apply_mask_corrections(original_cutout, drawing_data, mode):
+def apply_mask_corrections(high_res_original, high_res_cutout, drawing_data, mode):
+    small_mask_array = np.array(drawing_data.image_data)
     
-    correction_mask_array = np.array(drawing_data.image_data)
+    if small_mask_array.size == 0 or np.all(small_mask_array[:, :, 3] == 0):
+        return high_res_cutout
 
-    if correction_mask_array.size == 0 or np.all(correction_mask_array[:, :, 3] == 0):
-        return original_cutout
+    small_mask_alpha = Image.fromarray(small_mask_array[:, :, 3])
+    high_res_mask = small_mask_alpha.resize(high_res_cutout.size, resample=Image.NEAREST)
+    high_res_mask_array = np.array(high_res_mask)
 
-    cutout_array = np.array(original_cutout.copy())
-    cutout_rgb = cutout_array[:, :, :3]
-    cutout_alpha = cutout_array[:, :, 3]
-    drawing_mask = correction_mask_array[:, :, 3] > 0
+    cutout_array = np.array(high_res_cutout.convert("RGBA"))
+    original_array = np.array(high_res_original.convert("RGBA"))
+
+    drawing_zone = high_res_mask_array > 0
     
     if mode == "Erase":
-        cutout_alpha[drawing_mask] = 0
-        
+        cutout_array[drawing_zone, 3] = 0
     elif mode == "Restore":
-        cutout_alpha[drawing_mask] = 255
-    corrected_array = np.dstack((cutout_rgb, cutout_alpha))
-    corrected_image = Image.fromarray(corrected_array, 'RGBA')
-    
-    return corrected_image
+        cutout_array[drawing_zone] = original_array[drawing_zone]
+
+    return Image.fromarray(cutout_array, 'RGBA')
 
 st.set_page_config(
-    page_title="Background Remover & Editor)",
+    page_title="Background Remover & Editor",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -58,60 +66,67 @@ uploaded_file = st.file_uploader(
 )
 
 if uploaded_file is not None:
+    file_bytes = uploaded_file.getvalue()
     
+    raw_img = Image.open(io.BytesIO(file_bytes))
+    high_res_image = resize_image(raw_img, HIGH_RES_WIDTH)
+    
+    buf_high = io.BytesIO()
+    high_res_image.save(buf_high, format="PNG")
+    high_res_bytes = buf_high.getvalue()
+    high_res_cutout = remove_background(high_res_bytes)
 
-    uploaded_file.seek(0)
-    original_image = Image.open(uploaded_file)
-    uploaded_file.seek(0) 
-    cutout_image_original = remove_background(uploaded_file)
+    display_image = resize_image(high_res_image, DISPLAY_WIDTH)
+    display_cutout = resize_image(high_res_cutout, DISPLAY_WIDTH)
 
     with st.sidebar:
         st.header("⚙️ Tool-uri")
-
         st.subheader("1. Ajustări")
         contrast_val = st.slider("Contrast", 0.5, 2.0, 1.0, 0.05)
         brightness_val = st.slider("Luminozitate", 0.5, 2.0, 1.0, 0.05)
+        
         st.subheader("2. Magic Brush Manual")
-        
         mode = st.radio("Mod Pensulă:", ["Erase", "Restore"])
-        
         brush_size = st.slider("Dimensiune Pensulă", 5, 50, 20, 1)
-        stroke_color = "#000000"
+        stroke_color = "rgba(0, 255, 0, 0.3)" if mode == "Restore" else "rgba(255, 0, 0, 0.3)"
         
-        st.info(f"Desenați pe imaginea decupată de alături. Modul curent: **{mode}**.")
     col_original, col_edited = st.columns(2)
+    
     with col_original:
         st.header("Imagine Originală")
-        st.image(original_image, use_column_width=True)
+        st.image(display_image, use_column_width=False, width=DISPLAY_WIDTH)
+        
     with col_edited:
         st.header("Imagine Editată")
-
+        
         canvas_result = st_canvas(
             fill_color="rgba(0, 0, 0, 0)",  
             stroke_width=brush_size,
             stroke_color=stroke_color,
-            background_image=cutout_image_original,
+            background_image=display_cutout,
             update_streamlit=True,
-            height=cutout_image_original.height,
-            width=cutout_image_original.width,
+            height=display_cutout.height,
+            width=display_cutout.width,
             drawing_mode="freedraw",
-            key="canvas",
+            key="canvas_editor",
         )
 
-        final_edited_image = cutout_image_original.copy()
+        final_high_res = high_res_cutout.copy()
+        
         if canvas_result.image_data is not None:
-
-            final_edited_image = apply_mask_corrections(
-                cutout_image_original, 
-                canvas_result, 
+            final_high_res = apply_mask_corrections(
+                high_res_image,
+                high_res_cutout,
+                canvas_result,
                 mode
             )
-        final_edited_image = apply_adjustments(final_edited_image, contrast_val, brightness_val)
+            
+        final_high_res = apply_adjustments(final_high_res, contrast_val, brightness_val)
         
-        st.image(final_edited_image, caption="Rezultat Final", use_column_width=True)
+        st.image(final_high_res, caption="Rezultat Final (Preview)", use_column_width=True)
 
         buf = io.BytesIO()
-        final_edited_image.save(buf, format="PNG")
+        final_high_res.save(buf, format="PNG")
         byte_im = buf.getvalue()
 
         st.download_button(
