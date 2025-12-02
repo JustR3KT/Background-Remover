@@ -16,7 +16,7 @@ To run this project, you need to have Python installed on your machine. Follow t
 
 1. Clone the repository:
    ```
-   git clone https://github.com/yourusername/bgremover.git
+   git clone https://github.com/JustR3KT/Background-Remover.git
    cd bgremover
    ```
 
